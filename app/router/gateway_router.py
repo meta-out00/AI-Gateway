@@ -1,40 +1,61 @@
 import time
+from typing import Optional
+from fastapi import HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
 from app.handlers.base_handler import BaseHandler
 from app.handlers.mock_handler import MockHandler
+from app.hooks.usage_logger import UsageLoggerHook
 from app.schemas.openai_schema import ChatCompletionRequest, ChatCompletionResponse
 
 
 class GatewayRouter:
     """
     ตัวกลางควบคุมเส้นทางคำขอ (Core Routing Engine)
-    ทำหน้าที่เลือก Handler ที่เหมาะสมตามชื่อโมเดล และวัดเวลาประมวลผล
+    ทำหน้าที่เลือก Handler, วัดเวลาประมวลผล และสั่งบันทึก Usage Log ลงฐานข้อมูล
     """
 
     def __init__(self):
-        # เตรียมตัวจำลอง MockHandler ไว้เป็นค่าเริ่มต้นของระบบ
         self.mock_handler: BaseHandler = MockHandler()
 
     def _select_handler(self, model_name: str) -> BaseHandler:
-        """ตัดสินใจเลือก Handler จากชื่อโมเดล (ในระยะที่ 1 ส่งเข้า MockHandler ทั้งหมด)"""
-        # หมายเหตุ: ในระยะถัดไป เมื่อต่อ PostgreSQL แล้ว ส่วนนี้จะไปค้นหา Provider จริงจากฐานข้อมูล
         if model_name.startswith("mock"):
             return self.mock_handler
         return self.mock_handler
 
     async def route_chat_completion(
-        self, request: ChatCompletionRequest
+        self,
+        request: ChatCompletionRequest,
+        db: AsyncSession,
+        api_key_id: Optional[int] = None,
     ) -> ChatCompletionResponse:
-        """รับคำขอแชท ส่งต่อให้ Handler ประมวลผล และจับเวลาการทำงาน"""
+        """รับคำขอแชท ส่งต่อให้ Handler ประมวลผล พร้อมบันทึกประวัติลงฐานข้อมูล"""
         start_time = time.perf_counter()
-
-        # 1. เลือกตัวประมวลผลที่เหมาะสม
         handler = self._select_handler(request.model)
 
-        # 2. สั่งประมวลผลคำขอ (ใช้คำสั่งมาตรฐานเดียวกันตามกฎของ BaseHandler)
-        response = await handler.chat_completion(request)
+        try:
+            # 1. สั่งประมวลผลคำขอ
+            response = await handler.chat_completion(request)
+            latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
-        # 3. คำนวณเวลาที่ใช้ไปทั้งหมด (Latency) หน่วยเป็นมิลลิวินาที (ms)
-        latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
-        print(f"[GatewayRouter] Model: {request.model} | Provider: {response.provider} | Latency: {latency_ms} ms")
+            # 2. บันทึกประวัติกรณีสำเร็จ (Status 200) ลงตาราง usage_logs
+            await UsageLoggerHook.log_success(
+                db=db,
+                response=response,
+                latency_ms=latency_ms,
+                api_key_id=api_key_id,
+            )
+            return response
 
-        return response
+        except HTTPException as exc:
+            # 3. หากเกิด HTTPException ให้บันทึกประวัติความล้มเหลวไว้ด้วย
+            latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            await UsageLoggerHook.log_failure(
+                db=db,
+                model_name=request.model,
+                provider_name="built-in-mock",
+                latency_ms=latency_ms,
+                status_code=exc.status_code,
+                error_message=str(exc.detail),
+                api_key_id=api_key_id,
+            )
+            raise exc
