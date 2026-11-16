@@ -1,98 +1,40 @@
-from app.handlers.mock_openai import MockOpenAI
-from app.handlers.mock_claude import MockClaude
-from app.handlers.mock_gemini import MockGemini
-
-from app.transformers import (
-    openai_transformer,
-    claude_transformer,
-    gemini_transformer
-)
+import time
+from app.handlers.base_handler import BaseHandler
+from app.handlers.mock_handler import MockHandler
+from app.schemas.openai_schema import ChatCompletionRequest, ChatCompletionResponse
 
 
 class GatewayRouter:
+    """
+    ตัวกลางควบคุมเส้นทางคำขอ (Core Routing Engine)
+    ทำหน้าที่เลือก Handler ที่เหมาะสมตามชื่อโมเดล และวัดเวลาประมวลผล
+    """
 
     def __init__(self):
+        # เตรียมตัวจำลอง MockHandler ไว้เป็นค่าเริ่มต้นของระบบ
+        self.mock_handler: BaseHandler = MockHandler()
 
-        self.providers = {
-            "openai": {
-                "models": [
-                    "gpt-6-luna",
-                    "gpt-6.1-sol"
-                ],
-                "handler": MockOpenAI(),
-                "transformer": openai_transformer
-            },
+    def _select_handler(self, model_name: str) -> BaseHandler:
+        """ตัดสินใจเลือก Handler จากชื่อโมเดล (ในระยะที่ 1 ส่งเข้า MockHandler ทั้งหมด)"""
+        # หมายเหตุ: ในระยะถัดไป เมื่อต่อ PostgreSQL แล้ว ส่วนนี้จะไปค้นหา Provider จริงจากฐานข้อมูล
+        if model_name.startswith("mock"):
+            return self.mock_handler
+        return self.mock_handler
 
-            "claude": {
-                "models": [
-                    "claude-sonnet",
-                    "claude-haiku"
-                ],
-                "handler": MockClaude(),
-                "transformer": claude_transformer
-            },
+    async def route_chat_completion(
+        self, request: ChatCompletionRequest
+    ) -> ChatCompletionResponse:
+        """รับคำขอแชท ส่งต่อให้ Handler ประมวลผล และจับเวลาการทำงาน"""
+        start_time = time.perf_counter()
 
-            "gemini": {
-                "models": [
-                    "gemini-2.5-pro",
-                    "gemini-2.5-flash"
-                ],
-                "handler": MockGemini(),
-                "transformer": gemini_transformer
-            }
-        }
+        # 1. เลือกตัวประมวลผลที่เหมาะสม
+        handler = self._select_handler(request.model)
 
-    async def route(
-        self,
-        provider: str,
-        model: str,
-        message: str
-    ) -> dict:
+        # 2. สั่งประมวลผลคำขอ (ใช้คำสั่งมาตรฐานเดียวกันตามกฎของ BaseHandler)
+        response = await handler.chat_completion(request)
 
-        # 1. ตรวจสอบ Provider
-        config = self.providers.get(provider)
+        # 3. คำนวณเวลาที่ใช้ไปทั้งหมด (Latency) หน่วยเป็นมิลลิวินาที (ms)
+        latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        print(f"[GatewayRouter] Model: {request.model} | Provider: {response.provider} | Latency: {latency_ms} ms")
 
-        if config is None:
-            raise ValueError(
-                f"Provider '{provider}' not found"
-            )
-
-        # 2. ตรวจสอบ Model ของ Provider นั้น
-        if model not in config["models"]:
-            raise ValueError(
-                f"Model '{model}' is not available "
-                f"for provider '{provider}'"
-            )
-
-        # 3. เลือก Handler
-        handler = config["handler"]
-
-        # 4. เลือก Transformer
-        transformer = config["transformer"]
-
-        # 5. แปลง Common Request
-        #    → Provider Request
-        provider_request = transformer.transform_request(
-            model,
-            message
-        )
-
-        # 6. ส่งให้ Provider
-        provider_response = await handler.generate(
-            provider_request
-        )
-
-        # 7. แปลง Provider Response
-        #    → Common Response
-        response = transformer.transform_response(
-            provider_response
-        )
-
-        return {
-            "provider": provider,
-            "model": model,
-            "response": response
-        }
-
-
-gateway_router = GatewayRouter()
+        return response

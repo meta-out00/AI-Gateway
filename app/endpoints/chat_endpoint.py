@@ -1,32 +1,19 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
+from app.router.gateway_router import GatewayRouter
+from app.schemas.openai_schema import ChatCompletionRequest, ChatCompletionResponse
 
-from app.schemas.openai_schema import (
-    ChatRequest,
-    ChatResponse
-)
+# สร้างกลุ่มเส้นทาง (Sub-router) สำหรับหมวด Chat
+router = APIRouter(prefix="/v1", tags=["Data Plane - Chat Completions"])
 
-from app.router.gateway_router import gateway_router
-
-
-router = APIRouter()
+# สร้างตัวจัดการเส้นทางเตรียมไว้ใช้งาน
+gateway_router = GatewayRouter()
 
 
-@router.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-
-    try:
-
-        result = await gateway_router.route(
-            provider=request.provider,
-            model=request.model,
-            message=request.message
-        )
-
-        return ChatResponse(**result)
-
-    except ValueError as e:
-
-        raise HTTPException(
-            status_code=404,
-            detail=str(e)
-        )
+@router.post("/chat/completions", response_model=ChatCompletionResponse)
+async def create_chat_completion(request: ChatCompletionRequest) -> ChatCompletionResponse:
+    """
+    Endpoint หลักสำหรับรับคำขอสนทนาตามมาตรฐาน OpenAI API
+    - รับ JSON Payload ตามโครงสร้าง ChatCompletionRequest
+    - ส่งต่อให้ GatewayRouter ตัดสินใจเลือก Provider และประมวลผล
+    """
+    return await gateway_router.route_chat_completion(request)
