@@ -1,7 +1,8 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from app.config import settings
-from app.endpoints import chat_endpoint
+from app.endpoints import admin_endpoint, chat_endpoint
+from app.repositories.admin_repo import AdminRepository
 from app.repositories.database import AsyncSessionLocal, Base, engine
 from app.repositories.provider_repo import ProviderRepository
 import app.repositories.models  # นำเข้าเพื่อให้ Base รู้จักตารางทั้งหมด
@@ -10,7 +11,7 @@ import app.repositories.models  # นำเข้าเพื่อให้ Bas
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """ทำงานอัตโนมัติตอนเริ่มเปิดเซิร์ฟเวอร์ และตอนปิดเซิร์ฟเวอร์"""
-    # 1. ตอนเริ่มเปิดเซิร์ฟเวอร์: สร้างตารางทั้งหมดใน PostgreSQL (ถ้ายังไม่มี)
+    # 1. สร้างตารางทั้งหมดใน PostgreSQL (ถ้ายังไม่มี)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -18,15 +19,19 @@ async def lifespan(app: FastAPI):
         await ProviderRepository.ensure_default_providers(db)
 
     print("[Database] Verified and initialized all PostgreSQL tables.")
-    
-    yield  # จุดนี้คือช่วงที่เซิร์ฟเวอร์กำลังรันรับ Request ปกติ
-    
-    # 2. ตอนปิดเซิร์ฟเวอร์: ปิดท่อเชื่อมต่อฐานข้อมูลทั้งหมดอย่างปลอดภัย
+
+    # 2. สร้างบัญชีแอดมินเริ่มต้นอัตโนมัติ (Auto-Seed)
+    async with AsyncSessionLocal() as session:
+        admin_repo = AdminRepository(session)
+        await admin_repo.seed_default_admin()
+
+    yield
+
+    # 3. ปิดท่อเชื่อมต่อฐานข้อมูลตอนปิดเซิร์ฟเวอร์
     await engine.dispose()
     print("[Database] Disconnected from PostgreSQL.")
 
 
-# สร้างออบเจกต์หลักของแอปพลิเคชัน FastAPI พร้อมผูก lifespan
 app = FastAPI(
     title=settings.APP_NAME,
     description="Modular AI Gateway รองรับมาตรฐาน OpenAI API, Mock AI Simulator และระบบจัดการสิทธิ์",
@@ -34,8 +39,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# นำเส้นทาง /v1/chat/completions มาเสียบเข้ากับแอปหลัก
 app.include_router(chat_endpoint.router)
+app.include_router(admin_endpoint.router)
 
 
 @app.get("/health", tags=["System"])
