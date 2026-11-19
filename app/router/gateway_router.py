@@ -1,48 +1,50 @@
+import json
+import time
+import uuid
+from collections.abc import AsyncGenerator
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.security import decrypt_provider_key
+from app.handlers.base_handler import BaseHandler
 from app.handlers.mock_handler import MockHandler
 from app.handlers.openai_compatible_handler import OpenAICompatibleHandler
 from app.hooks.usage_logger import UsageLoggerHook
 from app.repositories.admin_repo import AdminRepository
-from app.schemas.openai_schema import ChatCompletionRequest, ChatCompletionResponse
+from app.repositories.database import AsyncSessionLocal
+from app.schemas.openai_schema import (
+    ChatCompletionChoice,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatMessage,
+    CompletionUsage,
+)
 
 
 class GatewayRouter:
     """
     ตัวกลางควบคุมเส้นทางคำขอ (Routing Engine)
-    - แยกคำขอระหว่าง Mock Simulator และ Real AI Providers
+    - รองรับทั้ง Non-Streaming และ SSE Streaming
     - รองรับทั้ง Managed Key (จาก DB) และ BYOK (X-Provider-Api-Key)
+    - จับเวลาและบันทึก Telemetry ลง usage_logs อัตโนมัติ
     """
 
     def __init__(self):
         self.mock_handler = MockHandler()
-        self.usage_logger = UsageLoggerHook()
 
     def _infer_default_base_url(self, model_name: str) -> str:
-        """กำหนด Base URL เริ่มต้นกรณีผู้ใช้ส่ง BYOK Key มาโดยยังไม่ได้ลงทะเบียน Provider ใน DB"""
         if model_name.startswith("gemini-"):
             return "https://generativelanguage.googleapis.com/v1beta/openai"
         return "https://api.openai.com/v1"
 
-    async def route_chat_completion(
+    async def resolve_handler(
         self,
         request: ChatCompletionRequest,
         db: AsyncSession,
-        api_key_id: int | None = None,
         byok_api_key: str | None = None,
-    ) -> ChatCompletionResponse:
-        # 1. กรณีเรียกใช้งาน Mock Simulator
+    ) -> tuple[BaseHandler, str]:
         if request.model.startswith("mock-"):
-            return await self.usage_logger.execute_and_log(
-                db=db,
-                request=request,
-                handler=self.mock_handler,
-                provider_name="mock-provider",
-                api_key_id=api_key_id,
-            )
+            return self.mock_handler, "built-in-mock"
 
-        # 2. กรณีเรียกใช้งานค่าย AI จริง (Real Provider)
         admin_repo = AdminRepository(db)
         provider = await admin_repo.get_active_provider_for_model(request.model)
 
@@ -59,7 +61,6 @@ class GatewayRouter:
         if provider:
             base_url = provider.base_url
             provider_name = provider.name
-            # ลำดับความสำคัญ: ใช้คีย์ส่วนตัว (BYOK) ก่อน ถ้าไม่มีค่อยถอดรหัสคีย์กลางจาก DB
             if byok_api_key:
                 resolved_api_key = byok_api_key
             elif provider.encrypted_api_key:
@@ -67,7 +68,6 @@ class GatewayRouter:
             else:
                 resolved_api_key = None
         else:
-            # กรณีแอดมินยังไม่ได้ลงทะเบียน Provider ใน DB แต่ผู้ใช้พกคีย์ส่วนตัว (BYOK) มาเอง
             if not byok_api_key:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -80,16 +80,142 @@ class GatewayRouter:
             provider_name = "byok-direct"
             resolved_api_key = byok_api_key
 
-        real_handler = OpenAICompatibleHandler(
+        handler = OpenAICompatibleHandler(
             base_url=base_url,
             api_key=resolved_api_key,
             provider_name=provider_name,
         )
+        return handler, provider_name
 
-        return await self.usage_logger.execute_and_log(
-            db=db,
-            request=request,
-            handler=real_handler,
-            provider_name=provider_name,
-            api_key_id=api_key_id,
-        )
+    async def route_chat_completion(
+        self,
+        request: ChatCompletionRequest,
+        db: AsyncSession,
+        api_key_id: int | None = None,
+        byok_api_key: str | None = None,
+    ) -> ChatCompletionResponse:
+        handler, provider_name = await self.resolve_handler(request, db, byok_api_key)
+
+        start_time = time.perf_counter()
+        try:
+            response = await handler.chat_completion(request)
+            latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
+
+            await UsageLoggerHook.log_success(
+                db=db,
+                response=response,
+                latency_ms=latency_ms,
+                api_key_id=api_key_id,
+            )
+            return response
+
+        except HTTPException as http_exc:
+            latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            await UsageLoggerHook.log_failure(
+                db=db,
+                model_name=request.model,
+                provider_name=provider_name,
+                latency_ms=latency_ms,
+                status_code=http_exc.status_code,
+                error_message=str(http_exc.detail),
+                api_key_id=api_key_id,
+            )
+            raise
+
+        except Exception as exc:
+            latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            await UsageLoggerHook.log_failure(
+                db=db,
+                model_name=request.model,
+                provider_name=provider_name,
+                latency_ms=latency_ms,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                error_message=str(exc),
+                api_key_id=api_key_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Internal Gateway Error: {str(exc)}",
+            )
+
+    async def stream_with_logging(
+        self,
+        handler: BaseHandler,
+        provider_name: str,
+        request: ChatCompletionRequest,
+        api_key_id: int | None = None,
+    ) -> AsyncGenerator[str, None]:
+        start_time = time.perf_counter()
+        stream_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_tokens = 0
+        collected_text = []
+
+        try:
+            async for chunk_str in handler.chat_completion_stream(request):
+                if chunk_str.startswith("data: ") and not chunk_str.strip().endswith("[DONE]"):
+                    try:
+                        payload = json.loads(chunk_str[6:].strip())
+                        if payload.get("id"):
+                            stream_id = payload["id"]
+                        choices = payload.get("choices", [])
+                        if choices:
+                            delta_content = choices[0].get("delta", {}).get("content", "")
+                            if delta_content:
+                                collected_text.append(delta_content)
+                        if payload.get("usage"):
+                            usage_obj = payload["usage"]
+                            prompt_tokens = usage_obj.get("prompt_tokens", 0)
+                            completion_tokens = usage_obj.get("completion_tokens", 0)
+                            total_tokens = usage_obj.get("total_tokens", 0)
+                    except Exception:
+                        pass
+
+                yield chunk_str
+
+            latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            synthetic_response = ChatCompletionResponse(
+                id=stream_id,
+                model=request.model,
+                provider=provider_name,
+                choices=[
+                    ChatCompletionChoice(
+                        index=0,
+                        message=ChatMessage(
+                            role="assistant", content="".join(collected_text)
+                        ),
+                    )
+                ],
+                usage=CompletionUsage(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
+                ),
+            )
+            # เปิด Session ใหม่สำหรับบันทึก Log หลังสตรีมจบ (ป้องกัน Session ของ Endpoint ปิดไปก่อน)
+            async with AsyncSessionLocal() as log_db:
+                await UsageLoggerHook.log_success(
+                    db=log_db,
+                    response=synthetic_response,
+                    latency_ms=latency_ms,
+                    api_key_id=api_key_id,
+                )
+
+        except HTTPException as http_exc:
+            latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            async with AsyncSessionLocal() as log_db:
+                await UsageLoggerHook.log_failure(
+                    db=log_db,
+                    model_name=request.model,
+                    provider_name=provider_name,
+                    latency_ms=latency_ms,
+                    status_code=http_exc.status_code,
+                    error_message=str(http_exc.detail),
+                    api_key_id=api_key_id,
+                )
+            err_payload = {
+                "error": {"message": str(http_exc.detail), "code": http_exc.status_code}
+            }
+            yield f"data: {json.dumps(err_payload, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"

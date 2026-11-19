@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import AsyncGenerator
 from app.schemas.openai_schema import ChatCompletionRequest, ChatCompletionResponse
 
 
@@ -14,3 +15,9 @@ class BaseHandler(ABC):
     ) -> ChatCompletionResponse:
         """รับ ChatCompletionRequest และต้องคืนค่าเป็น ChatCompletionResponse เสมอ"""
         pass
+
+    async def chat_completion_stream(
+        self, request: ChatCompletionRequest
+    ) -> AsyncGenerator[str, None]:
+        raise NotImplementedError("Streaming is not supported by this handler.")
+        yield ""
