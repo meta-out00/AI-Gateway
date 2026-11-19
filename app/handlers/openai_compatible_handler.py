@@ -1,5 +1,7 @@
+import json
 import time
 import uuid
+from collections.abc import AsyncGenerator
 import httpx
 from fastapi import HTTPException, status
 from app.handlers.base_handler import BaseHandler
@@ -15,7 +17,7 @@ from app.schemas.openai_schema import (
 class OpenAICompatibleHandler(BaseHandler):
     """
     ตัวเชื่อมต่อค่าย AI ภายนอกที่ใช้มาตรฐาน OpenAI-Compatible API
-    รองรับ OpenAI, Google Gemini (OpenAI endpoint), OpenRouter, Groq และ Ollama
+    รองรับทั้งแบบรอจบประโยค (Non-Streaming) และไหลทีละคำ (SSE Streaming)
     """
 
     def __init__(
@@ -28,7 +30,6 @@ class OpenAICompatibleHandler(BaseHandler):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.provider_name = provider_name
-        # แยก Timeout: ต่อเน็ตต้องไม่เกิน 10 วิ แต่รอ AI ประมวลผลคำตอบได้ถึง 120 วิ
         self.timeout = httpx.Timeout(
             connect=10.0,
             read=read_timeout,
@@ -40,41 +41,40 @@ class OpenAICompatibleHandler(BaseHandler):
         """ปรับแต่งโครงสร้าง messages ให้อัตโนมัติตามข้อจำกัดของแต่ละค่าย/โมเดล"""
         normalized = [msg.model_dump() for msg in messages]
 
-        # กฎของ Gemini: ต้องมี role 'user' อย่างน้อย 1 ข้อความ (ถ้าส่งมาแค่ system ให้แปลงเป็น user)
         if model_name.startswith("gemini-"):
             has_user_msg = any(m["role"] == "user" for m in normalized)
             if not has_user_msg and normalized:
                 normalized[-1]["role"] = "user"
 
-        # กฎของ OpenAI ตระกูล Reasoning (o1, o3): เปลี่ยน system เป็น developer
         if model_name.startswith(("o1-", "o3-")):
             for m in normalized:
                 if m["role"] == "system":
                     m["role"] = "developer"
 
-        return normalized    
+        return normalized
+
+    def _build_payload(self, request: ChatCompletionRequest, stream: bool) -> dict:
+        payload = {
+            "model": request.model,
+            "messages": self._normalize_messages(request.model, request.messages),
+            "temperature": request.temperature,
+            "stream": stream,
+        }
+        if request.max_tokens is not None:
+            payload["max_tokens"] = request.max_tokens
+        if stream:
+            payload["stream_options"] = {"include_usage": True}
+        return payload
 
     async def chat_completion(
         self, request: ChatCompletionRequest
     ) -> ChatCompletionResponse:
         url = f"{self.base_url}/chat/completions"
-
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        payload = {
-            "model": request.model,
-            "messages": self._normalize_messages(request.model, request.messages),
-            "temperature": request.temperature,
-            "stream": False,
-        }
-        if request.max_tokens is not None:
-            payload["max_tokens"] = request.max_tokens
-
-        # ลดเวลา Thinking ของโมเดล Gemini รุ่นใหม่เพื่อให้ตอบกลับเร็วขึ้น
-        if request.model.startswith("gemini-"):
-            payload["reasoning_effort"] = "low"
+        payload = self._build_payload(request, stream=False)
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -101,27 +101,23 @@ class OpenAICompatibleHandler(BaseHandler):
                 error_msg = error_data.get("error", {}).get("message", response.text)
             except Exception:
                 error_msg = response.text
-
             raise HTTPException(
                 status_code=response.status_code,
                 detail=f"Upstream Provider Error: {error_msg}",
             )
 
         data = response.json()
-
-        choices = []
-        for idx, item in enumerate(data.get("choices", [])):
-            msg_data = item.get("message", {})
-            choices.append(
-                ChatCompletionChoice(
-                    index=item.get("index", idx),
-                    message=ChatMessage(
-                        role=msg_data.get("role", "assistant"),
-                        content=msg_data.get("content", ""),
-                    ),
-                    finish_reason=item.get("finish_reason", "stop"),
-                )
+        choices = [
+            ChatCompletionChoice(
+                index=item.get("index", idx),
+                message=ChatMessage(
+                    role=item.get("message", {}).get("role", "assistant"),
+                    content=item.get("message", {}).get("content", ""),
+                ),
+                finish_reason=item.get("finish_reason", "stop"),
             )
+            for idx, item in enumerate(data.get("choices", []))
+        ]
 
         usage_data = data.get("usage", {})
         usage = CompletionUsage(
@@ -139,3 +135,52 @@ class OpenAICompatibleHandler(BaseHandler):
             choices=choices,
             usage=usage,
         )
+
+    async def chat_completion_stream(
+        self, request: ChatCompletionRequest
+    ) -> AsyncGenerator[str, None]:
+        url = f"{self.base_url}/chat/completions"
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        payload = self._build_payload(request, stream=True)
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                async with client.stream(
+                    "POST", url, json=payload, headers=headers
+                ) as response:
+                    if response.status_code >= 400:
+                        raw_err = await response.aread()
+                        try:
+                            err_json = json.loads(raw_err.decode("utf-8"))
+                            err_msg = err_json.get("error", {}).get(
+                                "message", raw_err.decode("utf-8")
+                            )
+                        except Exception:
+                            err_msg = raw_err.decode("utf-8", errors="ignore")
+
+                        raise HTTPException(
+                            status_code=response.status_code,
+                            detail=f"Upstream Provider Error: {err_msg}",
+                        )
+
+                    async for line in response.aiter_lines():
+                        if line.startswith("data: "):
+                            yield f"{line}\n\n"
+        except httpx.ConnectTimeout:
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="Connection to upstream AI provider timed out (10s).",
+            )
+        except httpx.ReadTimeout:
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="Upstream AI provider stream timed out.",
+            )
+        except httpx.RequestError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to connect to upstream AI provider: {str(exc)}",
+            )
