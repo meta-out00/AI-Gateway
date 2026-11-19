@@ -1,61 +1,85 @@
-import time
-from typing import Optional
-from fastapi import HTTPException
+from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.handlers.base_handler import BaseHandler
+from app.auth.security import decrypt_provider_key
 from app.handlers.mock_handler import MockHandler
+from app.handlers.openai_compatible_handler import OpenAICompatibleHandler
 from app.hooks.usage_logger import UsageLoggerHook
+from app.repositories.admin_repo import AdminRepository
 from app.schemas.openai_schema import ChatCompletionRequest, ChatCompletionResponse
 
 
 class GatewayRouter:
     """
-    ตัวกลางควบคุมเส้นทางคำขอ (Core Routing Engine)
-    ทำหน้าที่เลือก Handler, วัดเวลาประมวลผล และสั่งบันทึก Usage Log ลงฐานข้อมูล
+    ตัวกลางควบคุมเส้นทางคำขอ (Routing Engine)
+    - แยกคำขอระหว่าง Mock Simulator และ Real AI Providers
+    - รองรับทั้ง Managed Key (จาก DB) และ BYOK (X-Provider-Api-Key)
     """
 
     def __init__(self):
-        self.mock_handler: BaseHandler = MockHandler()
+        self.mock_handler = MockHandler()
+        self.usage_logger = UsageLoggerHook()
 
-    def _select_handler(self, model_name: str) -> BaseHandler:
-        if model_name.startswith("mock"):
-            return self.mock_handler
-        return self.mock_handler
+    def _infer_default_base_url(self, model_name: str) -> str:
+        """กำหนด Base URL เริ่มต้นกรณีผู้ใช้ส่ง BYOK Key มาโดยยังไม่ได้ลงทะเบียน Provider ใน DB"""
+        if model_name.startswith("gemini-"):
+            return "https://generativelanguage.googleapis.com/v1beta/openai"
+        return "https://api.openai.com/v1"
 
     async def route_chat_completion(
         self,
         request: ChatCompletionRequest,
         db: AsyncSession,
-        api_key_id: Optional[int] = None,
+        api_key_id: int | None = None,
+        byok_api_key: str | None = None,
     ) -> ChatCompletionResponse:
-        """รับคำขอแชท ส่งต่อให้ Handler ประมวลผล พร้อมบันทึกประวัติลงฐานข้อมูล"""
-        start_time = time.perf_counter()
-        handler = self._select_handler(request.model)
-
-        try:
-            # 1. สั่งประมวลผลคำขอ
-            response = await handler.chat_completion(request)
-            latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
-
-            # 2. บันทึกประวัติกรณีสำเร็จ (Status 200) ลงตาราง usage_logs
-            await UsageLoggerHook.log_success(
+        # 1. กรณีเรียกใช้งาน Mock Simulator
+        if request.model.startswith("mock-"):
+            return await self.usage_logger.execute_and_log(
                 db=db,
-                response=response,
-                latency_ms=latency_ms,
+                request=request,
+                handler=self.mock_handler,
+                provider_name="mock-provider",
                 api_key_id=api_key_id,
             )
-            return response
 
-        except HTTPException as exc:
-            # 3. หากเกิด HTTPException ให้บันทึกประวัติความล้มเหลวไว้ด้วย
-            latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
-            await UsageLoggerHook.log_failure(
-                db=db,
-                model_name=request.model,
-                provider_name="built-in-mock",
-                latency_ms=latency_ms,
-                status_code=exc.status_code,
-                error_message=str(exc.detail),
-                api_key_id=api_key_id,
-            )
-            raise exc
+        # 2. กรณีเรียกใช้งานค่าย AI จริง (Real Provider)
+        admin_repo = AdminRepository(db)
+        provider = await admin_repo.get_active_provider_for_model(request.model)
+
+        if provider:
+            base_url = provider.base_url
+            provider_name = provider.name
+            # ลำดับความสำคัญ: ใช้คีย์ส่วนตัว (BYOK) ก่อน ถ้าไม่มีค่อยถอดรหัสคีย์กลางจาก DB
+            if byok_api_key:
+                resolved_api_key = byok_api_key
+            elif provider.encrypted_api_key:
+                resolved_api_key = decrypt_provider_key(provider.encrypted_api_key)
+            else:
+                resolved_api_key = None
+        else:
+            # กรณีแอดมินยังไม่ได้ลงทะเบียน Provider ใน DB แต่ผู้ใช้พกคีย์ส่วนตัว (BYOK) มาเอง
+            if not byok_api_key:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"No active AI provider configured for model '{request.model}'. "
+                        "Either register a provider via /admin/providers or pass your own key via 'X-Provider-Api-Key' header."
+                    ),
+                )
+            base_url = self._infer_default_base_url(request.model)
+            provider_name = "byok-direct"
+            resolved_api_key = byok_api_key
+
+        real_handler = OpenAICompatibleHandler(
+            base_url=base_url,
+            api_key=resolved_api_key,
+            provider_name=provider_name,
+        )
+
+        return await self.usage_logger.execute_and_log(
+            db=db,
+            request=request,
+            handler=real_handler,
+            provider_name=provider_name,
+            api_key_id=api_key_id,
+        )
