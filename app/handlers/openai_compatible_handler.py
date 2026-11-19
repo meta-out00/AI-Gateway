@@ -23,12 +23,36 @@ class OpenAICompatibleHandler(BaseHandler):
         base_url: str,
         api_key: str | None = None,
         provider_name: str = "openai-compatible",
-        timeout: float = 60.0,
+        read_timeout: float = 120.0,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.provider_name = provider_name
-        self.timeout = timeout
+        # แยก Timeout: ต่อเน็ตต้องไม่เกิน 10 วิ แต่รอ AI ประมวลผลคำตอบได้ถึง 120 วิ
+        self.timeout = httpx.Timeout(
+            connect=10.0,
+            read=read_timeout,
+            write=10.0,
+            pool=10.0,
+        )
+
+    def _normalize_messages(self, model_name: str, messages: list) -> list[dict]:
+        """ปรับแต่งโครงสร้าง messages ให้อัตโนมัติตามข้อจำกัดของแต่ละค่าย/โมเดล"""
+        normalized = [msg.model_dump() for msg in messages]
+
+        # กฎของ Gemini: ต้องมี role 'user' อย่างน้อย 1 ข้อความ (ถ้าส่งมาแค่ system ให้แปลงเป็น user)
+        if model_name.startswith("gemini-"):
+            has_user_msg = any(m["role"] == "user" for m in normalized)
+            if not has_user_msg and normalized:
+                normalized[-1]["role"] = "user"
+
+        # กฎของ OpenAI ตระกูล Reasoning (o1, o3): เปลี่ยน system เป็น developer
+        if model_name.startswith(("o1-", "o3-")):
+            for m in normalized:
+                if m["role"] == "system":
+                    m["role"] = "developer"
+
+        return normalized    
 
     async def chat_completion(
         self, request: ChatCompletionRequest
@@ -39,23 +63,31 @@ class OpenAICompatibleHandler(BaseHandler):
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        # เตรียม Payload ตามมาตรฐาน OpenAI (ตัดฟิลด์จำลอง mock_* ออกก่อนส่งออกเน็ต)
         payload = {
             "model": request.model,
-            "messages": [msg.model_dump() for msg in request.messages],
+            "messages": self._normalize_messages(request.model, request.messages),
             "temperature": request.temperature,
             "stream": False,
         }
         if request.max_tokens is not None:
             payload["max_tokens"] = request.max_tokens
 
+        # ลดเวลา Thinking ของโมเดล Gemini รุ่นใหม่เพื่อให้ตอบกลับเร็วขึ้น
+        if request.model.startswith("gemini-"):
+            payload["reasoning_effort"] = "low"
+
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(url, json=payload, headers=headers)
-        except httpx.TimeoutException:
+        except httpx.ConnectTimeout:
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail=f"Upstream AI provider timed out after {self.timeout}s.",
+                detail="Connection to upstream AI provider timed out (10s).",
+            )
+        except httpx.ReadTimeout:
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="Upstream AI provider took too long to generate a response.",
             )
         except httpx.RequestError as exc:
             raise HTTPException(
@@ -63,7 +95,6 @@ class OpenAICompatibleHandler(BaseHandler):
                 detail=f"Failed to connect to upstream AI provider: {str(exc)}",
             )
 
-        # จัดการกรณีค่ายปลายทางตอบกลับมาเป็น Error (เช่น 401 Invalid Key, 429 Quota Exceeded)
         if response.status_code >= 400:
             try:
                 error_data = response.json()
@@ -78,7 +109,6 @@ class OpenAICompatibleHandler(BaseHandler):
 
         data = response.json()
 
-        # แปลงผลลัพธ์จากค่ายปลายทางให้ตรงกับ ChatCompletionResponse ของ Gateway
         choices = []
         for idx, item in enumerate(data.get("choices", [])):
             msg_data = item.get("message", {})
