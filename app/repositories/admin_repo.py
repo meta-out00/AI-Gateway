@@ -108,3 +108,20 @@ class AdminRepository:
             select(Provider).order_by(Provider.priority.asc(), Provider.id.asc())
         )
         return list(result.scalars().all())
+
+    async def get_active_provider_for_model(self, model_name: str) -> Provider | None:
+        """
+        ค้นหา Provider ที่เปิดใช้งานอยู่โดยเรียงตาม priority (เลขน้อย = สำคัญกว่า)
+        - หากมี Provider ที่ตั้ง default_model ตรงกับ model_name จะเลือกตัวนั้นก่อน
+        - หากไม่มี จะดึง Provider หลักที่มี priority สูงสุดมาใช้งาน
+        """
+        providers = await self.list_providers()
+        active_providers = [p for p in providers if p.is_active]
+        if not active_providers:
+            return None
+
+        for provider in active_providers:
+            if provider.default_model == model_name:
+                return provider
+
+        return active_providers[0]
