@@ -32,7 +32,8 @@ class ApiKey(Base):
     key_prefix: Mapped[str] = mapped_column(String(20), index=True, nullable=False)
     hashed_key: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    rate_limit_per_minute: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    role_name: Mapped[str | None] = mapped_column(String(50), index=True, nullable=True, default=None)
+    rate_limit_per_minute: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     max_budget_usd: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
     current_spend_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -104,3 +105,18 @@ class AuditLog(Base):
     )
 
     admin_user: Mapped["User | None"] = relationship(back_populates="audit_logs")
+
+
+class RolePolicy(Base):
+    __tablename__ = "role_policies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    role_name: Mapped[str] = mapped_column(String(50), unique=True, index=True, nullable=False)
+    description: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    default_rate_limit_per_minute: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    default_max_budget_usd: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    # รายชื่อโมเดลหรือ Prefix ที่อนุญาตคั่นด้วยลูกน้ำ เช่น "mock-,gemini-flash-lite,gpt-4o-mini" หรือ "*" สำหรับทุกรุ่น
+    allowed_models: Mapped[str] = mapped_column(Text, default="*", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, Header
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.auth.rate_limiter import enforce_rate_limit
+from app.auth.rate_limiter import enforce_rate_limit, verify_model_access
 from app.repositories.database import get_db
 from app.repositories.models import ApiKey
 from app.router.gateway_router import GatewayRouter
@@ -24,9 +24,12 @@ async def create_chat_completion(
 ):
     """
     Endpoint หลักสำหรับรับคำขอสนทนาตามมาตรฐาน OpenAI API
-    - ตรวจสอบสิทธิ์ Virtual API Key และจำกัดความเร็ว (Rate Limit RPM)
+    - ตรวจสอบสิทธิ์ Virtual API Key, โควต้าตาม Role (งบประมาณ/ความเร็ว) และสิทธิ์เรียกใช้งานโมเดล
     - รองรับทั้งการตอบกลับแบบก้อนเดียว (stream: false) และไหลทีละคำ (stream: true)
     """
+    # ตรวจสิทธิ์การเรียกใช้โมเดลตาม Role Policy (บล็อกทั้งแบบปกติและ Streaming)
+    verify_model_access(api_key=api_key, model_name=request.model)
+
     if request.stream:
         # Resolve Handler ก่อนเริ่มสตรีม เพื่อให้คืน HTTP 400 ได้ทันทีหากตั้งค่าไม่ครบ
         handler, provider_name = await gateway_router.resolve_handler(

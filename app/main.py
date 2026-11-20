@@ -19,6 +19,7 @@ async def lifespan(app: FastAPI):
     async with AsyncSessionLocal() as session:
         admin_repo = AdminRepository(session)
         await admin_repo.seed_default_admin()
+        await admin_repo.seed_default_roles()
 
     yield
 
