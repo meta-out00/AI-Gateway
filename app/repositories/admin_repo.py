@@ -45,6 +45,7 @@ class AdminRepository:
         key_name: str,
         user_id: int,
         rate_limit_per_minute: int = 60,
+        max_budget_usd: float | None = None,
         expires_at: datetime | None = None,
     ) -> tuple[ApiKey, str]:
         """สร้าง Virtual API Key ใหม่ คืนค่า (ApiKey Record, raw_key ที่โชว์ครั้งเดียว)"""
@@ -55,6 +56,8 @@ class AdminRepository:
             hashed_key=hashed_key,
             user_id=user_id,
             rate_limit_per_minute=rate_limit_per_minute,
+            max_budget_usd=max_budget_usd,
+            current_spend_usd=0.0,
             is_active=True,
             expires_at=expires_at,
         )

@@ -38,8 +38,24 @@ rate_limiter = InMemoryRateLimiter()
 async def enforce_rate_limit(
     api_key: ApiKey = Depends(verify_virtual_api_key),
 ) -> ApiKey:
-    """Dependency สำหรับตรวจสิทธิ์ API Key พร้อมเช็กโควต้า RPM ต่อเนื่องในขั้นตอนเดียว"""
+    """Dependency สำหรับตรวจสิทธิ์ API Key, ตรวจงบประมาณ (Budget) และเช็กโควต้า RPM"""
+    # 1. ตรวจงบประมาณ (Budget Limit)
+    if (
+        api_key.max_budget_usd is not None
+        and api_key.current_spend_usd >= api_key.max_budget_usd
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=(
+                f"Budget limit exceeded. "
+                f"Current spend: ${api_key.current_spend_usd:.6f} / "
+                f"Max budget: ${api_key.max_budget_usd:.6f}"
+            ),
+        )
+
+    # 2. ตรวจความเร็วการยิง (Rate Limit RPM)
     limit = getattr(api_key, "rate_limit_per_minute", None)
     if limit and limit > 0:
         rate_limiter.check_rate_limit(key_id=api_key.id, limit_per_minute=limit)
+
     return api_key

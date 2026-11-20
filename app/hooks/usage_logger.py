@@ -3,6 +3,7 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.repositories.log_repo import LogRepository
 from app.schemas.openai_schema import ChatCompletionResponse
+from app.services.cost_calculator import CostCalculator
 
 
 class UsageLoggerHook:
@@ -15,7 +16,13 @@ class UsageLoggerHook:
         latency_ms: float,
         api_key_id: Optional[int] = None,
     ) -> None:
-        """บันทึก Log เมื่อ AI ตอบกลับสำเร็จ (Status 200)"""
+        """คำนวณค่าใช้จ่าย บันทึก Log และอัปเดตยอดใช้จ่ายสะสมของ API Key"""
+        cost_usd = CostCalculator.calculate_cost(
+            model_name=response.model,
+            prompt_tokens=response.usage.prompt_tokens,
+            completion_tokens=response.usage.completion_tokens,
+        )
+
         repo = LogRepository(db)
         await repo.create_usage_log(
             request_id=response.id,
@@ -25,9 +32,13 @@ class UsageLoggerHook:
             prompt_tokens=response.usage.prompt_tokens,
             completion_tokens=response.usage.completion_tokens,
             total_tokens=response.usage.total_tokens,
+            cost_usd=cost_usd,
             latency_ms=latency_ms,
             status_code=200,
         )
+
+        if api_key_id is not None and cost_usd > 0:
+            await repo.increment_api_key_spend(api_key_id=api_key_id, cost_usd=cost_usd)
 
     @staticmethod
     async def log_failure(

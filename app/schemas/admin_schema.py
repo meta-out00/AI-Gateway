@@ -17,6 +17,7 @@ class TokenResponse(BaseModel):
 class ApiKeyCreateRequest(BaseModel):
     key_name: str = Field(..., min_length=1, max_length=100, examples=["Mobile App Key"])
     rate_limit_per_minute: int = Field(default=60, ge=1, le=10000)
+    max_budget_usd: float | None = Field(default=None, ge=0)
     expires_at: datetime | None = None
 
 
@@ -26,6 +27,8 @@ class ApiKeyCreateResponse(BaseModel):
     key_prefix: str
     raw_api_key: str  # แสดงคีย์เต็มเพียงครั้งเดียวตอนสร้างเท่านั้น
     rate_limit_per_minute: int
+    max_budget_usd: float | None = None
+    current_spend_usd: float = 0.0
     is_active: bool
     created_at: datetime
 
@@ -35,6 +38,8 @@ class ApiKeyItemResponse(BaseModel):
     key_name: str
     key_prefix: str
     rate_limit_per_minute: int
+    max_budget_usd: float | None = None
+    current_spend_usd: float = 0.0
     is_active: bool
     expires_at: datetime | None
     created_at: datetime

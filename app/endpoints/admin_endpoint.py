@@ -74,6 +74,7 @@ async def create_virtual_api_key(
         key_name=payload.key_name,
         user_id=current_admin.id,
         rate_limit_per_minute=payload.rate_limit_per_minute,
+        max_budget_usd=payload.max_budget_usd,
         expires_at=payload.expires_at,
     )
 
@@ -81,7 +82,7 @@ async def create_virtual_api_key(
         action="CREATE_API_KEY",
         target_resource=f"api_key:{new_key.id}",
         admin_user_id=current_admin.id,
-        details=f"Created key '{new_key.key_name}' ({new_key.key_prefix})",
+        details=f"Created key '{new_key.key_name}' ({new_key.key_prefix}), max_budget={new_key.max_budget_usd}",
         ip_address=request.client.host if request.client else None,
     )
 
@@ -91,6 +92,8 @@ async def create_virtual_api_key(
         key_prefix=new_key.key_prefix,
         raw_api_key=raw_key,
         rate_limit_per_minute=new_key.rate_limit_per_minute,
+        max_budget_usd=new_key.max_budget_usd,
+        current_spend_usd=new_key.current_spend_usd,
         is_active=new_key.is_active,
         created_at=new_key.created_at,
     )
