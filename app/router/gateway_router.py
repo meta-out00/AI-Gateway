@@ -48,16 +48,6 @@ class GatewayRouter:
         admin_repo = AdminRepository(db)
         provider = await admin_repo.get_active_provider_for_model(request.model)
 
-        # ถ้า Provider ที่เจอใน DB เป็นประเภท mock ให้เข้า MockHandler ทันที ไม่ออกเน็ตไป base_url
-        if provider and provider.provider_type == "mock":
-            return await self.usage_logger.execute_and_log(
-                db=db,
-                request=request,
-                handler=self.mock_handler,
-                provider_name=provider.name,
-                api_key_id=api_key_id,
-            )
-
         if provider:
             base_url = provider.base_url
             provider_name = provider.name
