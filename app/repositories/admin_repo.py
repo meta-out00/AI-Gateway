@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.security import (
     encrypt_provider_key,
@@ -7,7 +7,7 @@ from app.auth.security import (
     hash_password,
 )
 from app.config import settings
-from app.repositories.models import ApiKey, Provider, User
+from app.repositories.models import ApiKey, Provider, RolePolicy, User
 
 
 class AdminRepository:
@@ -44,17 +44,21 @@ class AdminRepository:
         self,
         key_name: str,
         user_id: int,
-        rate_limit_per_minute: int = 60,
+        role_name: str | None = None,
+        rate_limit_per_minute: int | None = None,
+        max_budget_usd: float | None = None,
         expires_at: datetime | None = None,
     ) -> tuple[ApiKey, str]:
-        """สร้าง Virtual API Key ใหม่ คืนค่า (ApiKey Record, raw_key ที่โชว์ครั้งเดียว)"""
         raw_key, key_prefix, hashed_key = generate_virtual_api_key()
         new_key = ApiKey(
             key_name=key_name,
             key_prefix=key_prefix,
             hashed_key=hashed_key,
             user_id=user_id,
+            role_name=role_name,
             rate_limit_per_minute=rate_limit_per_minute,
+            max_budget_usd=max_budget_usd,
+            current_spend_usd=0.0,
             is_active=True,
             expires_at=expires_at,
         )
@@ -62,6 +66,105 @@ class AdminRepository:
         await self.db.commit()
         await self.db.refresh(new_key)
         return new_key, raw_key
+
+    async def seed_default_roles(self) -> None:
+        """สร้างกลุ่มสิทธิ์มาตรฐานเริ่มต้นอัตโนมัติ หากยังไม่มีในฐานข้อมูล"""
+        default_roles = [
+            {
+                "role_name": "admin",
+                "description": "ผู้ดูแลระบบ (ไม่จำกัดงบและใช้ได้ทุกรุ่น)",
+                "default_rate_limit_per_minute": 1000,
+                "default_max_budget_usd": None,
+                "allowed_models": "*",
+            },
+            {
+                "role_name": "student",
+                "description": "นักศึกษา (งบ $2, 20 RPM, โมเดลรุ่นประหยัด)",
+                "default_rate_limit_per_minute": 20,
+                "default_max_budget_usd": 2.0,
+                "allowed_models": "mock-,gemini-flash-lite,gpt-4o-mini",
+            },
+            {
+                "role_name": "lecturer",
+                "description": "อาจารย์ (งบ $20, 60 RPM, ใช้ได้ทุกรุ่น)",
+                "default_rate_limit_per_minute": 60,
+                "default_max_budget_usd": 20.0,
+                "allowed_models": "*",
+            },
+            {
+                "role_name": "expert",
+                "description": "ผู้เชี่ยวชาญ (งบ $50, 120 RPM, ใช้ได้ทุกรุ่น)",
+                "default_rate_limit_per_minute": 120,
+                "default_max_budget_usd": 50.0,
+                "allowed_models": "*",
+            },
+        ]
+
+        created_any = False
+        for item in default_roles:
+            existing = await self.get_role_by_name(item["role_name"])
+            if not existing:
+                self.db.add(RolePolicy(**item))
+                created_any = True
+
+        if created_any:
+            await self.db.commit()
+            print("[Seed] Initialized default role policies (admin, student, lecturer, expert).")
+
+    async def list_roles(self) -> list[RolePolicy]:
+        result = await self.db.execute(select(RolePolicy).order_by(RolePolicy.id.asc()))
+        return list(result.scalars().all())
+
+    async def get_role_by_id(self, role_id: int) -> RolePolicy | None:
+        result = await self.db.execute(select(RolePolicy).where(RolePolicy.id == role_id))
+        return result.scalar_one_or_none()
+
+    async def get_role_by_name(self, role_name: str) -> RolePolicy | None:
+        result = await self.db.execute(
+            select(RolePolicy).where(RolePolicy.role_name == role_name.strip().lower())
+        )
+        return result.scalar_one_or_none()
+
+    async def create_role(
+        self,
+        role_name: str,
+        description: str | None,
+        default_rate_limit_per_minute: int,
+        default_max_budget_usd: float | None,
+        allowed_models: str,
+    ) -> RolePolicy:
+        role = RolePolicy(
+            role_name=role_name.strip().lower(),
+            description=description,
+            default_rate_limit_per_minute=default_rate_limit_per_minute,
+            default_max_budget_usd=default_max_budget_usd,
+            allowed_models=allowed_models.strip() or "*",
+        )
+        self.db.add(role)
+        await self.db.commit()
+        await self.db.refresh(role)
+        return role
+
+    async def update_role(
+        self,
+        role: RolePolicy,
+        updates: dict,
+    ) -> RolePolicy:
+        for field, value in updates.items():
+            setattr(role, field, value)
+        await self.db.commit()
+        await self.db.refresh(role)
+        return role
+
+    async def count_api_keys_by_role(self, role_name: str) -> int:
+        result = await self.db.execute(
+            select(func.count(ApiKey.id)).where(ApiKey.role_name == role_name)
+        )
+        return result.scalar_one()
+
+    async def delete_role(self, role: RolePolicy) -> None:
+        await self.db.delete(role)
+        await self.db.commit()
 
     async def list_api_keys(self) -> list[ApiKey]:
         result = await self.db.execute(select(ApiKey).order_by(ApiKey.id.desc()))

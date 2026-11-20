@@ -13,6 +13,9 @@ from app.schemas.admin_schema import (
     ApiKeyItemResponse,
     ProviderCreateRequest,
     ProviderResponse,
+    RolePolicyCreateRequest,
+    RolePolicyResponse,
+    RolePolicyUpdateRequest,
     TokenResponse,
 )
 
@@ -70,10 +73,21 @@ async def create_virtual_api_key(
     admin_repo = AdminRepository(db)
     log_repo = LogRepository(db)
 
+    normalized_role = payload.role_name.strip().lower() if payload.role_name else None
+    if normalized_role:
+        role_exists = await admin_repo.get_role_by_name(normalized_role)
+        if not role_exists:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Role '{normalized_role}' does not exist. Check GET /admin/roles first.",
+            )
+
     new_key, raw_key = await admin_repo.create_api_key(
         key_name=payload.key_name,
         user_id=current_admin.id,
+        role_name=normalized_role,
         rate_limit_per_minute=payload.rate_limit_per_minute,
+        max_budget_usd=payload.max_budget_usd,
         expires_at=payload.expires_at,
     )
 
@@ -81,7 +95,10 @@ async def create_virtual_api_key(
         action="CREATE_API_KEY",
         target_resource=f"api_key:{new_key.id}",
         admin_user_id=current_admin.id,
-        details=f"Created key '{new_key.key_name}' ({new_key.key_prefix})",
+        details=(
+            f"Created key '{new_key.key_name}' ({new_key.key_prefix}), "
+            f"role={new_key.role_name}, max_budget={new_key.max_budget_usd}"
+        ),
         ip_address=request.client.host if request.client else None,
     )
 
@@ -90,7 +107,10 @@ async def create_virtual_api_key(
         key_name=new_key.key_name,
         key_prefix=new_key.key_prefix,
         raw_api_key=raw_key,
+        role_name=new_key.role_name,
         rate_limit_per_minute=new_key.rate_limit_per_minute,
+        max_budget_usd=new_key.max_budget_usd,
+        current_spend_usd=new_key.current_spend_usd,
         is_active=new_key.is_active,
         created_at=new_key.created_at,
     )
@@ -172,3 +192,124 @@ async def list_providers(
     """ดูรายชื่อค่าย AI ปลายทางทั้งหมด"""
     admin_repo = AdminRepository(db)
     return await admin_repo.list_providers()
+
+
+# ==========================================
+# 4. จัดการกลุ่มสิทธิ์และโควต้า (Role Policies)
+# ==========================================
+@router.get("/roles", response_model=list[RolePolicyResponse])
+async def list_role_policies(
+    current_admin: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """ดูรายการกลุ่มสิทธิ์และโควต้าเริ่มต้นทั้งหมด"""
+    admin_repo = AdminRepository(db)
+    return await admin_repo.list_roles()
+
+
+@router.post("/roles", response_model=RolePolicyResponse, status_code=status.HTTP_201_CREATED)
+async def create_role_policy(
+    payload: RolePolicyCreateRequest,
+    request: Request,
+    current_admin: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """เพิ่มกลุ่มสิทธิ์และกำหนดโควต้าเริ่มต้นใหม่"""
+    admin_repo = AdminRepository(db)
+    log_repo = LogRepository(db)
+
+    if await admin_repo.get_role_by_name(payload.role_name):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Role '{payload.role_name}' already exists.",
+        )
+
+    role = await admin_repo.create_role(
+        role_name=payload.role_name,
+        description=payload.description,
+        default_rate_limit_per_minute=payload.default_rate_limit_per_minute,
+        default_max_budget_usd=payload.default_max_budget_usd,
+        allowed_models=payload.allowed_models,
+    )
+
+    await log_repo.create_audit_log(
+        action="CREATE_ROLE_POLICY",
+        target_resource=f"role:{role.role_name}",
+        admin_user_id=current_admin.id,
+        details=(
+            f"rpm={role.default_rate_limit_per_minute}, "
+            f"budget={role.default_max_budget_usd}, models={role.allowed_models}"
+        ),
+        ip_address=request.client.host if request.client else None,
+    )
+    return role
+
+
+@router.put("/roles/{role_id}", response_model=RolePolicyResponse)
+async def update_role_policy(
+    role_id: int,
+    payload: RolePolicyUpdateRequest,
+    request: Request,
+    current_admin: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """แก้ไขโควต้าหรือสิทธิ์โมเดลของกลุ่ม (มีผลทันทีกับคีย์ที่ไม่ได้ Override)"""
+    admin_repo = AdminRepository(db)
+    log_repo = LogRepository(db)
+
+    role = await admin_repo.get_role_by_id(role_id)
+    if not role:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role policy not found.")
+
+    updates = payload.model_dump(exclude_unset=True)
+    updated_role = await admin_repo.update_role(role, updates)
+
+    await log_repo.create_audit_log(
+        action="UPDATE_ROLE_POLICY",
+        target_resource=f"role:{updated_role.role_name}",
+        admin_user_id=current_admin.id,
+        details=f"Updated fields: {updates}",
+        ip_address=request.client.host if request.client else None,
+    )
+    return updated_role
+
+
+@router.delete("/roles/{role_id}", status_code=status.HTTP_200_OK)
+async def delete_role_policy(
+    role_id: int,
+    request: Request,
+    current_admin: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """ลบกลุ่มสิทธิ์ (ป้องกันการลบกลุ่ม admin หรือกลุ่มที่ยังมี API Key ผูกอยู่)"""
+    admin_repo = AdminRepository(db)
+    log_repo = LogRepository(db)
+
+    role = await admin_repo.get_role_by_id(role_id)
+    if not role:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role policy not found.")
+
+    if role.role_name == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete the system 'admin' role.",
+        )
+
+    in_use_count = await admin_repo.count_api_keys_by_role(role.role_name)
+    if in_use_count > 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot delete role '{role.role_name}' because {in_use_count} API key(s) are assigned to it.",
+        )
+
+    role_name = role.role_name
+    await admin_repo.delete_role(role)
+
+    await log_repo.create_audit_log(
+        action="DELETE_ROLE_POLICY",
+        target_resource=f"role:{role_name}",
+        admin_user_id=current_admin.id,
+        details=f"Deleted role '{role_name}'",
+        ip_address=request.client.host if request.client else None,
+    )
+    return {"message": f"Role '{role_name}' deleted successfully."}

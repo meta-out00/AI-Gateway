@@ -15,8 +15,16 @@ class TokenResponse(BaseModel):
 
 # --- 2. Virtual API Keys ---
 class ApiKeyCreateRequest(BaseModel):
-    key_name: str = Field(..., min_length=1, max_length=100, examples=["Mobile App Key"])
-    rate_limit_per_minute: int = Field(default=60, ge=1, le=10000)
+    key_name: str = Field(..., min_length=1, max_length=100, examples=["Student Key 01"])
+    role_name: str | None = Field(default="student", examples=["student"])
+    rate_limit_per_minute: int | None = Field(
+        default=None, ge=1, le=10000, examples=[None],
+        description="ใส่ null เพื่อใช้ค่าเริ่มต้นตาม Role หรือใส่ตัวเลขเพื่อ Override เฉพาะคีย์นี้",
+    )
+    max_budget_usd: float | None = Field(
+        default=None, ge=0, examples=[None],
+        description="ใส่ null เพื่อใช้ค่าเริ่มต้นตาม Role หรือใส่ตัวเลขเพื่อ Override เฉพาะคีย์นี้",
+    )
     expires_at: datetime | None = None
 
 
@@ -24,8 +32,11 @@ class ApiKeyCreateResponse(BaseModel):
     id: int
     key_name: str
     key_prefix: str
-    raw_api_key: str  # แสดงคีย์เต็มเพียงครั้งเดียวตอนสร้างเท่านั้น
-    rate_limit_per_minute: int
+    raw_api_key: str
+    role_name: str | None = None
+    rate_limit_per_minute: int | None = None
+    max_budget_usd: float | None = None
+    current_spend_usd: float = 0.0
     is_active: bool
     created_at: datetime
 
@@ -34,7 +45,10 @@ class ApiKeyItemResponse(BaseModel):
     id: int
     key_name: str
     key_prefix: str
-    rate_limit_per_minute: int
+    role_name: str | None = None
+    rate_limit_per_minute: int | None = None
+    max_budget_usd: float | None = None
+    current_spend_usd: float = 0.0
     is_active: bool
     expires_at: datetime | None
     created_at: datetime
@@ -60,6 +74,37 @@ class ProviderResponse(BaseModel):
     default_model: str
     priority: int
     is_active: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+# --- 4. Role Policies  ---
+class RolePolicyCreateRequest(BaseModel):
+    role_name: str = Field(..., min_length=1, max_length=50, examples=["researcher"])
+    description: str | None = Field(default=None, max_length=255, examples=["กลุ่มนักวิจัย"])
+    default_rate_limit_per_minute: int = Field(default=60, ge=1, le=10000, examples=[60])
+    default_max_budget_usd: float | None = Field(default=None, ge=0, examples=[15.0])
+    allowed_models: str = Field(
+        default="*",
+        examples=["mock-,gemini-flash-lite,gpt-4o-mini"],
+        description="ใส่ '*' เพื่ออนุญาตทุกรุ่น หรือระบุ Prefix คั่นด้วยเครื่องหมายจุลภาค (,)",
+    )
+
+
+class RolePolicyUpdateRequest(BaseModel):
+    description: str | None = Field(default=None, max_length=255)
+    default_rate_limit_per_minute: int | None = Field(default=None, ge=1, le=10000)
+    default_max_budget_usd: float | None = Field(default=None, ge=0)
+    allowed_models: str | None = None
+
+
+class RolePolicyResponse(BaseModel):
+    id: int
+    role_name: str
+    description: str | None
+    default_rate_limit_per_minute: int
+    default_max_budget_usd: float | None
+    allowed_models: str
     created_at: datetime
 
     model_config = {"from_attributes": True}
