@@ -108,3 +108,43 @@ class RolePolicyResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# --- 5. Request and Audit Logs ---
+class UsageLogResponse(BaseModel):
+    id: int
+    request_id: str
+    api_key_id: int | None
+    provider_name: str
+    model_name: str
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    latency_ms: float
+    cost_usd: float
+    status_code: int
+    error_message: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AuditLogResponse(BaseModel):
+    id: int
+    action: str
+    target_resource: str
+    admin_user_id: int | None
+    details: str | None
+    ip_address: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class UsageLogSummaryResponse(BaseModel):
+    total_requests: int
+    successful_requests: int
+    failed_requests: int
+    total_tokens: int
+    total_cost_usd: float
+    average_latency_ms: float

@@ -92,7 +92,10 @@ class OpenAICompatibleHandler(BaseHandler):
         except httpx.RequestError as exc:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Failed to connect to upstream AI provider: {str(exc)}",
+                detail=(
+                    f"Failed to connect to upstream AI provider at {self.base_url}: "
+                    f"{type(exc).__name__}"
+                ),
             )
 
         if response.status_code >= 400:
@@ -182,5 +185,8 @@ class OpenAICompatibleHandler(BaseHandler):
         except httpx.RequestError as exc:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Failed to connect to upstream AI provider: {str(exc)}",
+                detail=(
+                    f"Failed to connect to upstream AI provider at {self.base_url}: "
+                    f"{type(exc).__name__}"
+                ),
             )

@@ -17,6 +17,9 @@ from app.schemas.admin_schema import (
     RolePolicyResponse,
     RolePolicyUpdateRequest,
     TokenResponse,
+    UsageLogResponse,
+    UsageLogSummaryResponse,
+    AuditLogResponse,
 )
 
 router = APIRouter(prefix="/admin", tags=["Control Plane - Admin Management"])
@@ -313,3 +316,35 @@ async def delete_role_policy(
         ip_address=request.client.host if request.client else None,
     )
     return {"message": f"Role '{role_name}' deleted successfully."}
+
+
+# ==========================================
+# 5. Request and Audit Logs
+# ==========================================
+@router.get("/logs/usage", response_model=list[UsageLogResponse])
+async def list_usage_logs(
+    limit: int = 100,
+    current_admin: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """อ่านรายการ Request/Usage Log ล่าสุด"""
+    return await LogRepository(db).list_usage_logs(limit=max(1, min(limit, 500)))
+
+
+@router.get("/logs/usage/summary", response_model=UsageLogSummaryResponse)
+async def get_usage_summary(
+    current_admin: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """สรุปจำนวน Request, Error, Token, Cost และ Latency"""
+    return await LogRepository(db).get_usage_summary()
+
+
+@router.get("/logs/audit", response_model=list[AuditLogResponse])
+async def list_audit_logs(
+    limit: int = 100,
+    current_admin: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """อ่านรายการ Audit Log ล่าสุด"""
+    return await LogRepository(db).list_audit_logs(limit=max(1, min(limit, 500)))

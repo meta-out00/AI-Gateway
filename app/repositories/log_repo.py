@@ -1,5 +1,5 @@
 from typing import Optional
-from sqlalchemy import update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.repositories.models import AuditLog, UsageLog, ApiKey
 
@@ -9,6 +9,43 @@ class LogRepository:
 
     def __init__(self, db: AsyncSession):
         self.db = db
+
+    async def list_usage_logs(self, limit: int = 100) -> list[UsageLog]:
+        result = await self.db.execute(
+            select(UsageLog)
+            .order_by(UsageLog.created_at.desc(), UsageLog.id.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def get_usage_summary(self) -> dict:
+        result = await self.db.execute(
+            select(
+                func.count(UsageLog.id),
+                func.count(UsageLog.id).filter(UsageLog.status_code.between(200, 399)),
+                func.count(UsageLog.id).filter(UsageLog.status_code >= 400),
+                func.coalesce(func.sum(UsageLog.total_tokens), 0),
+                func.coalesce(func.sum(UsageLog.cost_usd), 0.0),
+                func.coalesce(func.avg(UsageLog.latency_ms), 0.0),
+            )
+        )
+        row = result.one()
+        return {
+            "total_requests": int(row[0] or 0),
+            "successful_requests": int(row[1] or 0),
+            "failed_requests": int(row[2] or 0),
+            "total_tokens": int(row[3] or 0),
+            "total_cost_usd": float(row[4] or 0.0),
+            "average_latency_ms": float(row[5] or 0.0),
+        }
+
+    async def list_audit_logs(self, limit: int = 100) -> list[AuditLog]:
+        result = await self.db.execute(
+            select(AuditLog)
+            .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
 
     async def create_usage_log(
         self,
