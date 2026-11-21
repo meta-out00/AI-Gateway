@@ -43,6 +43,7 @@ async def create_chat_completion(
                 provider_name=provider_name,
                 request=request,
                 api_key_id=api_key.id,
+                is_byok=bool(x_provider_api_key and x_provider_api_key.strip()),
             ),
             media_type="text/event-stream",
             headers={
