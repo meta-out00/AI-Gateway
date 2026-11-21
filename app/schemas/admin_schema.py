@@ -78,7 +78,8 @@ class ProviderResponse(BaseModel):
 
     model_config = {"from_attributes": True}
 
-# --- 4. Role Policies  ---
+
+# --- 4. Role Policies ---
 class RolePolicyCreateRequest(BaseModel):
     role_name: str = Field(..., min_length=1, max_length=50, examples=["researcher"])
     description: str | None = Field(default=None, max_length=255, examples=["กลุ่มนักวิจัย"])
@@ -108,3 +109,72 @@ class RolePolicyResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# --- 5. Usage, Analytics & Audit Logs ---
+class BreakdownItemResponse(BaseModel):
+    name: str
+    requests: int
+    total_tokens: int
+    cost_usd: float
+
+
+class AnalyticsSummaryResponse(BaseModel):
+    total_requests: int
+    success_requests: int
+    failed_requests: int
+    total_prompt_tokens: int
+    total_completion_tokens: int
+    total_tokens: int
+    system_cost_usd: float
+    byok_cost_usd: float
+    total_cost_usd: float
+    avg_latency_ms: float
+    by_model: list[BreakdownItemResponse]
+    by_provider: list[BreakdownItemResponse]
+
+
+class UsageLogItemResponse(BaseModel):
+    id: int
+    request_id: str
+    api_key_id: int | None
+    provider_name: str
+    model_name: str
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    cost_usd: float
+    is_byok: bool
+    latency_ms: float
+    status_code: int
+    error_message: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AuditLogItemResponse(BaseModel):
+    id: int
+    admin_user_id: int | None
+    action: str
+    target_resource: str
+    details: str | None
+    ip_address: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class MyUsageResponse(BaseModel):
+    key_name: str
+    key_prefix: str
+    role_name: str | None
+    effective_rate_limit_per_minute: int | None
+    effective_max_budget_usd: float | None
+    current_spend_usd: float
+    remaining_budget_usd: float | None
+    allowed_models: str
+    total_requests: int
+    total_tokens: int
+    byok_requests: int
+    byok_estimated_cost_usd: float
